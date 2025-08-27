@@ -1,0 +1,8 @@
+.cproject
+Debug/
+Drivers/
+.mxproject
+.project
+.settings/
+STM32F767ZITX_FLASH.ld
+STM32F767ZITX_RAM.ld
