@@ -1,16 +1,24 @@
 #include "cli.h"
 #include "stepgen.h"
 #include "motor.h"
+#include "swerve_module.h"
 #include "app_timers.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
+
+// Constants for backward compatibility
+#define WHEEL_RADIUS_M SWERVE_WHEEL_RADIUS_M
 
 extern RCC_ClkInitTypeDef RCC_ClkInitStruct;
 
 // External motor instances for testing
 extern Motor m0, m1, m2, m3, m4, m5;  // All 6 motors
 extern Motor motor_test;  // Legacy test motor
+
+// Swerve module instances
+SwerveModule swerve_fr, swerve_fl, swerve_r;
 
 static void cli_send_string(const char* str);
 static int cli_receive_line(char* buffer, int max_len);
@@ -29,6 +37,7 @@ static void cmd_stepgen(void);
 static void cmd_motor(void);
 static void cmd_tick(void);
 static void cmd_pc(void);
+static void cmd_swerve(void);
 
 typedef struct {
     const char* name;
@@ -45,6 +54,7 @@ static const command_t commands[] = {
     {"echo", cmd_echo, "Echo back received arguments"},
     {"stepgen", cmd_stepgen, "Control test stepgen: stepgen <sps> or stepgen info"},
     {"motor", cmd_motor, "Control motors: motor <name> <cmd> [args]"},
+    {"swerve", cmd_swerve, "Control swerve modules: swerve <module> <cmd> [args]"},
     {"tick", cmd_tick, "Show TIM6 5kHz ISR diagnostics and performance"},
     {"pc", cmd_pc, "Show pulse counts: pc [motor_id] or pc all"}
 };
@@ -700,4 +710,356 @@ static int cli_receive_line(char* buffer, int max_len)
     }
     
     return 0;
+}
+
+// Initialize swerve modules once
+static bool swerve_modules_initialized = false;
+
+static void init_swerve_modules(void)
+{
+    if (swerve_modules_initialized) return;
+    
+    // Initialize swerve modules with motor configuration
+    // FR: m0=steer, m1=drive
+    swerve_module_init(&swerve_fr, &m0, &m1, 
+                      1600.0f, 1600.0f,    // steps per rev at motor
+                      1000, 5000,          // steer limits  
+                      2000, 10000);        // drive limits
+    
+    // FL: m2=steer, m3=drive  
+    swerve_module_init(&swerve_fl, &m2, &m3,
+                      1600.0f, 1600.0f,    // steps per rev at motor
+                      1000, 5000,          // steer limits
+                      2000, 10000);        // drive limits
+    
+    // R: m4=steer, m5=drive
+    swerve_module_init(&swerve_r, &m4, &m5,
+                      1600.0f, 1600.0f,    // steps per rev at motor
+                      1000, 5000,          // steer limits
+                      2000, 10000);        // drive limits
+    
+    swerve_modules_initialized = true;
+}
+
+static SwerveModule* get_swerve_module(const char* name)
+{
+    init_swerve_modules();
+    
+    if (strcmp(name, "fr") == 0) return &swerve_fr;
+    if (strcmp(name, "fl") == 0) return &swerve_fl;
+    if (strcmp(name, "r") == 0) return &swerve_r;
+    return NULL;
+}
+
+static void cmd_swerve(void)
+{
+    char buffer[100];
+    
+    if (arg_count == 1 || (arg_count == 2 && strcmp(args[1], "help") == 0))
+    {
+        cli_send_string("Swerve Module Commands:\r\n");
+        cli_send_string("  swerve <module> info                    - Show module status\r\n");
+        cli_send_string("  swerve <module> home <offset_steps>     - Home the steer motor\r\n");
+        cli_send_string("  swerve <module> cmd <angle_deg> <vel_mps> - Set angle and velocity\r\n");
+        cli_send_string("  swerve <module> cal <steer_spr> <drive_spm> - Set calibration\r\n");
+        cli_send_string("  swerve <module> tol <angle_deg>         - Set angle tolerance\r\n");
+        cli_send_string("  swerve <module> debug                   - Show angle calculation debug\r\n");
+        cli_send_string("  swerve <module> reset                   - Emergency reset position counter\r\n");
+        cli_send_string("  swerve all info                         - Show all modules\r\n");
+        cli_send_string("  swerve all cmd <angle_deg> <vel_mps>    - Command all modules\r\n");
+        cli_send_string("  swerve all home <offset_steps>          - Home all modules\r\n");
+        cli_send_string("\r\nModules: fr (front-right), fl (front-left), r (rear)\r\n");
+        cli_send_string("Examples:\r\n");
+        cli_send_string("  swerve fr home 0        - Home FR module\r\n");
+        cli_send_string("  swerve fr cmd 45 1.0    - FR: 45°, 1.0 m/s\r\n");
+        cli_send_string("  swerve all cmd 0 1.5    - All modules: 0°, 1.5 m/s\r\n");
+        cli_send_string("  swerve all home 0       - Home all modules\r\n");
+        cli_send_string("  swerve fl cal 3700 1000 - FL: 3700 steps/rad, 1000 steps/m\r\n");
+        return;
+    }
+    
+    if (arg_count < 3)
+    {
+        cli_send_string("Usage: swerve <module> <cmd> [args] or swerve help\r\n");
+        return;
+    }
+    
+    // Handle "all" modules
+    if (strcmp(args[1], "all") == 0)
+    {
+        init_swerve_modules();
+        SwerveModule* modules[] = {&swerve_fr, &swerve_fl, &swerve_r};
+        const char* names[] = {"FR", "FL", "R"};
+        
+        if (strcmp(args[2], "info") == 0)
+        {
+            cli_send_string("All Swerve Modules Status:\r\n");
+            
+            for (int i = 0; i < 3; i++)
+            {
+                int32_t angle_deg_x10 = (int32_t)(swerve_module_get_current_angle(modules[i]) * 1800.0f / 3.14159f);
+                int32_t vel_x100 = (int32_t)(swerve_module_get_current_velocity(modules[i]) * 100);
+                snprintf(buffer, sizeof(buffer), "%s: homed=%s, angle=%d.%d deg, vel=%d.%02d m/s, inv=%d\r\n",
+                        names[i],
+                        modules[i]->is_homed ? "yes" : "no",
+                        (int)(angle_deg_x10/10), abs((int)(angle_deg_x10%10)),
+                        (int)(vel_x100/100), abs((int)(vel_x100%100)),
+                        modules[i]->drive_inverted);
+                cli_send_string(buffer);
+            }
+            return;
+        }
+        else if (strcmp(args[2], "cmd") == 0 && arg_count >= 5)
+        {
+            float angle_deg = atof(args[3]);
+            float velocity_mps = atof(args[4]);
+            float angle_rad = angle_deg * 3.14159f / 180.0f;
+            
+            // Check if all modules are homed
+            bool all_homed = true;
+            for (int i = 0; i < 3; i++)
+            {
+                if (!modules[i]->is_homed)
+                {
+                    snprintf(buffer, sizeof(buffer), "Module %s not homed\r\n", names[i]);
+                    cli_send_string(buffer);
+                    all_homed = false;
+                }
+            }
+            
+            if (!all_homed)
+            {
+                cli_send_string("All modules must be homed first\r\n");
+                return;
+            }
+            
+            // Command all modules
+            for (int i = 0; i < 3; i++)
+            {
+                swerve_module_set_command(modules[i], angle_rad, velocity_mps);
+            }
+            
+            int32_t angle_deg_x10 = (int32_t)(angle_deg * 10);
+            int32_t vel_x100 = (int32_t)(velocity_mps * 100);
+            snprintf(buffer, sizeof(buffer), "All modules: cmd %d.%d deg, %d.%02d m/s\r\n", 
+                    (int)(angle_deg_x10/10), abs((int)(angle_deg_x10%10)),
+                    (int)(vel_x100/100), abs((int)(vel_x100%100)));
+            cli_send_string(buffer);
+            return;
+        }
+        else if (strcmp(args[2], "home") == 0 && arg_count >= 4)
+        {
+            int32_t offset = atoi(args[3]);
+            
+            for (int i = 0; i < 3; i++)
+            {
+                swerve_module_home(modules[i], offset);
+            }
+            
+            snprintf(buffer, sizeof(buffer), "All modules homed with offset %ld steps\r\n", (long)offset);
+            cli_send_string(buffer);
+            return;
+        }
+        else
+        {
+            cli_send_string("Unknown 'all' command. Use: info, cmd <angle> <vel>, home <offset>\r\n");
+            return;
+        }
+    }
+    
+    // Single module commands
+    SwerveModule* module = get_swerve_module(args[1]);
+    if (!module)
+    {
+        cli_send_string("Unknown module. Use: fr, fl, r\r\n");
+        return;
+    }
+    
+    const char* cmd = args[2];
+    
+    if (strcmp(cmd, "info") == 0)
+    {
+        snprintf(buffer, sizeof(buffer), "Module %s:\r\n", args[1]);
+        cli_send_string(buffer);
+        
+        snprintf(buffer, sizeof(buffer), "  Homed: %s\r\n", module->is_homed ? "yes" : "no");
+        cli_send_string(buffer);
+        
+        if (module->is_homed)
+        {
+            int32_t cur_angle_deg_x10 = (int32_t)(swerve_module_get_current_angle(module) * 1800.0f / 3.14159f);
+            int32_t cmd_angle_deg_x10 = (int32_t)(module->angle_cmd_rad * 1800.0f / 3.14159f);
+            snprintf(buffer, sizeof(buffer), "  Angle: %d.%d deg (cmd: %d.%d deg)\r\n",
+                    (int)(cur_angle_deg_x10/10), abs((int)(cur_angle_deg_x10%10)),
+                    (int)(cmd_angle_deg_x10/10), abs((int)(cmd_angle_deg_x10%10)));
+            cli_send_string(buffer);
+            
+            snprintf(buffer, sizeof(buffer), "  At angle: %s\r\n", 
+                     swerve_module_is_at_angle(module) ? "yes" : "no");
+            cli_send_string(buffer);
+        }
+        
+        int32_t vel_x100 = (int32_t)(swerve_module_get_current_velocity(module) * 100);
+        snprintf(buffer, sizeof(buffer), "  Velocity: %d.%02d m/s (inverted: %s)\r\n",
+                (int)(vel_x100/100), abs((int)(vel_x100%100)),
+                module->drive_inverted ? "yes" : "no");
+        cli_send_string(buffer);
+        
+        int32_t limit_deg = (int32_t)(SWERVE_STEER_LIMIT_RAD * 180.0f / 3.14159f);
+        int32_t wheel_x1000 = (int32_t)(SWERVE_WHEEL_RADIUS_M * 1000);
+        snprintf(buffer, sizeof(buffer), "  Limits: ±%ld deg, wheel=%ld.%03ld m\r\n",
+                limit_deg, wheel_x1000/1000, wheel_x1000%1000);
+        cli_send_string(buffer);
+        
+        int32_t tol_deg_x10 = (int32_t)(SWERVE_ANGLE_TOL_RAD * 1800.0f / 3.14159f);
+        int32_t tol_steps = (int32_t)(SWERVE_ANGLE_TOL_RAD * module->steer_steps_per_rad);
+        snprintf(buffer, sizeof(buffer), "  Tolerance: %d.%d deg (%ld steps)\r\n",
+                (int)(tol_deg_x10/10), abs((int)(tol_deg_x10%10)), (long)tol_steps);
+        cli_send_string(buffer);
+    }
+    else if (strcmp(cmd, "home") == 0)
+    {
+        if (arg_count < 4)
+        {
+            cli_send_string("Usage: swerve <module> home <offset_steps>\r\n");
+            return;
+        }
+        
+        int32_t offset = atoi(args[3]);
+        swerve_module_home(module, offset);
+        
+        snprintf(buffer, sizeof(buffer), "Module %s homed with offset %ld steps\r\n", 
+                 args[1], (long)offset);
+        cli_send_string(buffer);
+    }
+    else if (strcmp(cmd, "cmd") == 0)
+    {
+        if (arg_count < 5)
+        {
+            cli_send_string("Usage: swerve <module> cmd <angle_deg> <velocity_mps>\r\n");
+            return;
+        }
+        
+        if (!module->is_homed)
+        {
+            cli_send_string("Module must be homed first\r\n");
+            return;
+        }
+        
+        float angle_deg = atof(args[3]);
+        float velocity_mps = atof(args[4]);
+        float angle_rad = angle_deg * 3.14159f / 180.0f;
+        
+        swerve_module_set_command(module, angle_rad, velocity_mps);
+        
+        int32_t angle_deg_x10 = (int32_t)(angle_deg * 10);
+        int32_t vel_x100 = (int32_t)(velocity_mps * 100);
+        snprintf(buffer, sizeof(buffer), "Module %s: cmd %d.%d deg, %d.%02d m/s\r\n", 
+                args[1], (int)(angle_deg_x10/10), abs((int)(angle_deg_x10%10)),
+                (int)(vel_x100/100), abs((int)(vel_x100%100)));
+        cli_send_string(buffer);
+    }
+    else if (strcmp(cmd, "cal") == 0)
+    {
+        if (arg_count < 5)
+        {
+            cli_send_string("Usage: swerve <module> cal <steer_steps_per_rad> <drive_steps_per_m>\r\n");
+            return;
+        }
+        
+        float steer_spr = atof(args[3]);
+        float drive_spm = atof(args[4]);
+        
+        swerve_module_set_calibration(module, steer_spr, drive_spm, WHEEL_RADIUS_M);
+        
+        int32_t steer_spr_int = (int32_t)steer_spr;
+        int32_t drive_spm_int = (int32_t)drive_spm;
+        snprintf(buffer, sizeof(buffer), "Module %s calibrated: %ld steps/rad, %ld steps/m\r\n", 
+                args[1], steer_spr_int, drive_spm_int);
+        cli_send_string(buffer);
+    }
+    else if (strcmp(cmd, "tol") == 0)
+    {
+        if (arg_count < 4)
+        {
+            cli_send_string("Usage: swerve <module> tol <angle_deg>\r\n");
+            return;
+        }
+        
+        float tol_deg = atof(args[3]);
+        float tol_rad = tol_deg * 3.14159f / 180.0f;
+        
+        // Note: New swerve module uses fixed tolerance SWERVE_ANGLE_TOL_RAD
+        
+        int32_t tol_steps = (int32_t)(tol_rad * module->steer_steps_per_rad);
+        int32_t tol_deg_x10 = (int32_t)(tol_deg * 10);
+        snprintf(buffer, sizeof(buffer), "Module %s tolerance: %d.%d deg (%ld steps)\r\n", 
+                args[1], (int)(tol_deg_x10/10), abs((int)(tol_deg_x10%10)), (long)tol_steps);
+        cli_send_string(buffer);
+    }
+    else if (strcmp(cmd, "debug") == 0)
+    {
+        if (!module->is_homed)
+        {
+            cli_send_string("Module must be homed first\r\n");
+            return;
+        }
+        
+        snprintf(buffer, sizeof(buffer), "Module %s Debug Info:\r\n", args[1]);
+        cli_send_string(buffer);
+        
+        // Get hardware counter and software position
+        int32_t hw_count = 0;
+        int32_t sw_pos = motor_get_position_steps(module->steer);
+        if (module->steer->hw.pulse_cnt_htim) {
+            hw_count = (int32_t)__HAL_TIM_GET_COUNTER(module->steer->hw.pulse_cnt_htim);
+        }
+        
+        snprintf(buffer, sizeof(buffer), "  HW Counter: %ld steps\r\n", hw_count);
+        cli_send_string(buffer);
+        snprintf(buffer, sizeof(buffer), "  SW Position: %ld steps\r\n", sw_pos);
+        cli_send_string(buffer);
+        snprintf(buffer, sizeof(buffer), "  Zero Offset: %ld steps\r\n", module->steer_zero_offset_steps);
+        cli_send_string(buffer);
+        
+        float current_angle = swerve_module_get_current_angle(module);
+        snprintf(buffer, sizeof(buffer), "  Current Angle: approx %ld deg\r\n", 
+                (int32_t)(current_angle * 180.0f / 3.14159f));
+        cli_send_string(buffer);
+        
+        snprintf(buffer, sizeof(buffer), "  Command Angle: approx %ld deg\r\n", 
+                (int32_t)(module->angle_cmd_rad * 180.0f / 3.14159f));
+        cli_send_string(buffer);
+        
+        float angle_diff = angle_difference(module->angle_cmd_rad, current_angle);
+        snprintf(buffer, sizeof(buffer), "  Angle Error: approx %ld deg\r\n", 
+                (int32_t)(angle_diff * 180.0f / 3.14159f));
+        cli_send_string(buffer);
+        
+        int32_t target_steps = angle_to_steps(module->angle_cmd_rad, module->steer_steps_per_rad, 
+                                              module->steer_zero_offset_steps);
+        int32_t steps_needed = target_steps - hw_count;
+        snprintf(buffer, sizeof(buffer), "  Target Steps: %ld, Need: %ld steps\r\n", 
+                target_steps, steps_needed);
+        cli_send_string(buffer);
+        
+        int32_t threshold_steps = (int32_t)(SWERVE_ANGLE_TOL_RAD * module->steer_steps_per_rad);
+        snprintf(buffer, sizeof(buffer), "  Movement Threshold: %ld steps\r\n", threshold_steps);
+        cli_send_string(buffer);
+    }
+    else if (strcmp(cmd, "reset") == 0)
+    {
+        // Emergency reset - set hardware counter to zero offset position
+        if (module->steer->hw.pulse_cnt_htim) {
+            __HAL_TIM_SET_COUNTER(module->steer->hw.pulse_cnt_htim, module->steer_zero_offset_steps);
+        }
+        module->steer->pos_steps = module->steer_zero_offset_steps;
+        
+        snprintf(buffer, sizeof(buffer), "Module %s position reset to zero offset\r\n", args[1]);
+        cli_send_string(buffer);
+    }
+    else
+    {
+        cli_send_string("Unknown command. Use: info, home, cmd, cal, tol, debug, reset\r\n");
+    }
 }
