@@ -4,6 +4,7 @@
 #include "motor.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include <math.h>
 
 // swerve_module.h — steer+drive wrapper with shortest-path, drive inversion, and ±150° steer limit
 

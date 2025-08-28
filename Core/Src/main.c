@@ -82,6 +82,7 @@ Motor m5;  // R drive
 
 // Legacy test motor (will remove later)
 Motor motor_test;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -1056,7 +1057,7 @@ static void MX_GPIO_Init(void)
 // Called by app_timers.c at 5kHz from TIM6 ISR
 void motor_tick_all_5k(void)
 {
-  // Tick all 6 motors in swerve drive system
+  // Tick all 6 motors in swerve drive system - 5kHz is only for motor ramps
   motor_tick_accel(&m0);  // FR steer
   motor_tick_accel(&m1);  // FR drive
   motor_tick_accel(&m2);  // FL steer

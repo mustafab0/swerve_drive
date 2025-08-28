@@ -2,6 +2,7 @@
 #include "stepgen.h"
 #include "motor.h"
 #include "swerve_module.h"
+#include "../Inc/swerve_kinematics.h"
 #include "app_timers.h"
 #include <string.h>
 #include <stdio.h>
@@ -19,6 +20,10 @@ extern Motor motor_test;  // Legacy test motor
 
 // Swerve module instances
 SwerveModule swerve_fr, swerve_fl, swerve_r;
+
+// Swerve kinematics instance with slew limiting
+SKM_State swerve_kin;
+static bool kinematics_initialized = false;
 
 static void cli_send_string(const char* str);
 static int cli_receive_line(char* buffer, int max_len);
@@ -38,6 +43,9 @@ static void cmd_motor(void);
 static void cmd_tick(void);
 static void cmd_pc(void);
 static void cmd_swerve(void);
+static void cmd_twist(void);
+static void cmd_mod(void);
+static void cmd_kin(void);
 
 typedef struct {
     const char* name;
@@ -55,6 +63,9 @@ static const command_t commands[] = {
     {"stepgen", cmd_stepgen, "Control test stepgen: stepgen <sps> or stepgen info"},
     {"motor", cmd_motor, "Control motors: motor <name> <cmd> [args]"},
     {"swerve", cmd_swerve, "Control swerve modules: swerve <module> <cmd> [args]"},
+    {"twist", cmd_twist, "Control robot body twist: twist <vx> <vy> <wz> or twist stop"},
+    {"mod", cmd_mod, "Module status: mod <i> stat"},
+    {"kin", cmd_kin, "Kinematics config: kin setpos <module> <x> <y> or kin show"},
     {"tick", cmd_tick, "Show TIM6 5kHz ISR diagnostics and performance"},
     {"pc", cmd_pc, "Show pulse counts: pc [motor_id] or pc all"}
 };
@@ -739,6 +750,23 @@ static void init_swerve_modules(void)
                       2000, 10000);        // drive limits
     
     swerve_modules_initialized = true;
+    
+    // Initialize kinematics system with slew limiting
+    if (!kinematics_initialized) {
+        SKM_Config cfg = {
+            .x = {0.1950f, 0.1950f, -0.1950f},      // FR, FL, R positions (x)
+            .y = {-0.1925f, 0.1925f, 0.0000f},      // FR, FL, R positions (y)
+            .vx_max = 2.0f,                          // Max chassis forward speed
+            .vy_max = 2.0f,                          // Max chassis sideways speed  
+            .wz_max = 3.0f,                          // Max yaw rate
+            .v_module_max = 2.0f,                    // Max individual wheel speed
+            .dvx_max = 0.050f,                       // 5 m/s² forward accel limit
+            .dvy_max = 0.050f,                       // 5 m/s² sideways accel limit
+            .dwz_max = 0.100f                        // 10 rad/s² yaw accel limit
+        };
+        skm_init(&swerve_kin, &cfg);
+        kinematics_initialized = true;
+    }
 }
 
 static SwerveModule* get_swerve_module(const char* name)
@@ -1062,4 +1090,299 @@ static void cmd_swerve(void)
     {
         cli_send_string("Unknown command. Use: info, home, cmd, cal, tol, debug, reset\r\n");
     }
+}
+
+// Function to run kinematics at 100Hz and send to modules
+static void update_twist_kinematics(void)
+{
+    if (!kinematics_initialized) return;
+    
+    SKM_Out out;
+    skm_update_100Hz(&swerve_kin, &out);
+    
+    // Display computed kinematics for debugging
+    char buffer[150];
+    const char* names[] = {"FR", "FL", "R"};
+    cli_send_string("Kinematics Output:\r\n");
+    for (int i = 0; i < 3; i++) {
+        int32_t angle_deg_x10 = (int32_t)(out.angle_rad[i] * 1800.0f / 3.14159f);
+        int32_t speed_x100 = (int32_t)(out.speed_mps[i] * 100);
+        snprintf(buffer, sizeof(buffer), "  %s: angle=%d.%d deg, speed=%d.%02d m/s\r\n",
+                names[i],
+                (int)(angle_deg_x10/10), abs((int)(angle_deg_x10%10)),
+                (int)(speed_x100/100), abs((int)(speed_x100%100)));
+        cli_send_string(buffer);
+    }
+    
+    // Show slewing and scaling info
+    int32_t vx_cmd_x100 = (int32_t)(swerve_kin.vx_cmd * 100);
+    int32_t vx_actual_x100 = (int32_t)(swerve_kin.vx * 100);
+    int32_t scale_x100 = (int32_t)(out.scale_factor * 100);
+    
+    snprintf(buffer, sizeof(buffer), "Slewing: vx_cmd=%d.%02d, vx_actual=%d.%02d, scale=%d.%02d\r\n",
+            (int)(vx_cmd_x100/100), abs((int)(vx_cmd_x100%100)),
+            (int)(vx_actual_x100/100), abs((int)(vx_actual_x100%100)),
+            (int)(scale_x100/100), abs((int)(scale_x100%100)));
+    cli_send_string(buffer);
+    
+    // Send computed angles and speeds to swerve modules
+    // Let swerve modules handle shortest path and inversion logic
+    SwerveModule* modules[] = {&swerve_fr, &swerve_fl, &swerve_r};
+    for (int i = 0; i < 3; i++) {
+        if (modules[i] && modules[i]->is_homed) {
+            swerve_module_set_angle_abs(modules[i], out.angle_rad[i]);
+            swerve_module_set_wheel_speed(modules[i], out.speed_mps[i]);
+        }
+    }
+}
+
+static void cmd_twist(void)
+{
+    char buffer[100];
+    
+    init_swerve_modules();
+    
+    if (arg_count == 1 || (arg_count == 2 && strcmp(args[1], "help") == 0))
+    {
+        cli_send_string("Twist Commands:\r\n");
+        cli_send_string("  twist <vx> <vy> <wz>    - Set body twist (m/s, m/s, rad/s)\r\n");
+        cli_send_string("  twist stop              - Stop all motion\r\n");
+        cli_send_string("  twist status            - Show current twist command\r\n");
+        cli_send_string("  twist update            - Manually update kinematics\r\n");
+        cli_send_string("\r\nFrames: +x forward, +y left, +z up (angles CCW+)\r\n");
+        cli_send_string("Examples:\r\n");
+        cli_send_string("  twist 0.3 0 0       - Pure forward 0.3 m/s\r\n");
+        cli_send_string("  twist 0 0.3 0       - Pure left 0.3 m/s\r\n");
+        cli_send_string("  twist 0 0 0.5       - Pure yaw 0.5 rad/s CCW\r\n");
+        cli_send_string("  twist 0.2 0.2 0     - Diagonal motion\r\n");
+        cli_send_string("  twist stop          - Emergency stop\r\n");
+        return;
+    }
+    
+    if (arg_count >= 2 && strcmp(args[1], "stop") == 0)
+    {
+        skm_set_twist(&swerve_kin, 0.0f, 0.0f, 0.0f);
+        update_twist_kinematics();
+        cli_send_string("Robot motion stopped\r\n");
+        return;
+    }
+    
+    if (arg_count >= 2 && strcmp(args[1], "update") == 0)
+    {
+        update_twist_kinematics();
+        cli_send_string("Kinematics updated\r\n");
+        return;
+    }
+    
+    if (arg_count >= 2 && strcmp(args[1], "status") == 0)
+    {
+        int32_t vx_cmd_x100 = (int32_t)(swerve_kin.vx_cmd * 100);
+        int32_t vy_cmd_x100 = (int32_t)(swerve_kin.vy_cmd * 100);
+        int32_t wz_cmd_x100 = (int32_t)(swerve_kin.wz_cmd * 100);
+        
+        int32_t vx_actual_x100 = (int32_t)(swerve_kin.vx * 100);
+        int32_t vy_actual_x100 = (int32_t)(swerve_kin.vy * 100);
+        int32_t wz_actual_x100 = (int32_t)(swerve_kin.wz * 100);
+        
+        snprintf(buffer, sizeof(buffer), "Twist Commands:\r\n");
+        cli_send_string(buffer);
+        snprintf(buffer, sizeof(buffer), "  vx_cmd: %d.%02d m/s, vx_actual: %d.%02d m/s\r\n", 
+                (int)(vx_cmd_x100/100), abs((int)(vx_cmd_x100%100)),
+                (int)(vx_actual_x100/100), abs((int)(vx_actual_x100%100)));
+        cli_send_string(buffer);
+        snprintf(buffer, sizeof(buffer), "  vy_cmd: %d.%02d m/s, vy_actual: %d.%02d m/s\r\n", 
+                (int)(vy_cmd_x100/100), abs((int)(vy_cmd_x100%100)),
+                (int)(vy_actual_x100/100), abs((int)(vy_actual_x100%100)));
+        cli_send_string(buffer);
+        snprintf(buffer, sizeof(buffer), "  wz_cmd: %d.%02d rad/s, wz_actual: %d.%02d rad/s\r\n", 
+                (int)(wz_cmd_x100/100), abs((int)(wz_cmd_x100%100)),
+                (int)(wz_actual_x100/100), abs((int)(wz_actual_x100%100)));
+        cli_send_string(buffer);
+        
+        // Show module positions and limits
+        cli_send_string("Module Positions:\r\n");
+        const char* names[] = {"FR", "FL", "R"};
+        for (int i = 0; i < 3; i++) {
+            int32_t x_x1000 = (int32_t)(swerve_kin.cfg.x[i] * 1000);
+            int32_t y_x1000 = (int32_t)(swerve_kin.cfg.y[i] * 1000);
+            snprintf(buffer, sizeof(buffer), "  %s: (%d.%03d, %d.%03d) m\r\n", 
+                    names[i],
+                    (int)(x_x1000/1000), abs((int)(x_x1000%1000)),
+                    (int)(y_x1000/1000), abs((int)(y_x1000%1000)));
+            cli_send_string(buffer);
+        }
+        return;
+    }
+    
+    if (arg_count < 4)
+    {
+        cli_send_string("Usage: twist <vx> <vy> <wz> or twist stop/status/help/update\r\n");
+        return;
+    }
+    
+    float vx = atof(args[1]);
+    float vy = atof(args[2]); 
+    float wz = atof(args[3]);
+    
+    skm_set_twist(&swerve_kin, vx, vy, wz);
+    update_twist_kinematics();  // Apply immediately
+    
+    int32_t vx_x100 = (int32_t)(vx * 100);
+    int32_t vy_x100 = (int32_t)(vy * 100);
+    int32_t wz_x100 = (int32_t)(wz * 100);
+    
+    snprintf(buffer, sizeof(buffer), "Twist command: vx=%d.%02d m/s, vy=%d.%02d m/s, wz=%d.%02d rad/s\r\n", 
+            (int)(vx_x100/100), abs((int)(vx_x100%100)),
+            (int)(vy_x100/100), abs((int)(vy_x100%100)),
+            (int)(wz_x100/100), abs((int)(wz_x100%100)));
+    cli_send_string(buffer);
+}
+
+static void cmd_mod(void)
+{
+    char buffer[150];
+    
+    init_swerve_modules();
+    
+    if (arg_count < 3 || strcmp(args[2], "stat") != 0)
+    {
+        cli_send_string("Usage: mod <i> stat\r\n");
+        cli_send_string("Modules: 0=FR, 1=FL, 2=R\r\n");
+        return;
+    }
+    
+    int module_idx = atoi(args[1]);
+    if (module_idx < 0 || module_idx >= 3)
+    {
+        cli_send_string("Invalid module index. Use 0=FR, 1=FL, 2=R\r\n");
+        return;
+    }
+    
+    SwerveModule* modules[] = {&swerve_fr, &swerve_fl, &swerve_r};
+    const char* names[] = {"FR", "FL", "R"};
+    SwerveModule* mod = modules[module_idx];
+    
+    snprintf(buffer, sizeof(buffer), "Module %d (%s) Status:\r\n", module_idx, names[module_idx]);
+    cli_send_string(buffer);
+    
+    snprintf(buffer, sizeof(buffer), "  Homed: %s\r\n", mod->is_homed ? "yes" : "no");
+    cli_send_string(buffer);
+    
+    if (mod->is_homed)
+    {
+        int32_t angle_now_deg_x10 = (int32_t)(swerve_module_get_angle_abs(mod) * 1800.0f / 3.14159f);
+        int32_t angle_cmd_deg_x10 = (int32_t)(mod->angle_cmd_rad * 1800.0f / 3.14159f);
+        snprintf(buffer, sizeof(buffer), "  angle_now: %d.%d deg\r\n",
+                (int)(angle_now_deg_x10/10), abs((int)(angle_now_deg_x10%10)));
+        cli_send_string(buffer);
+        snprintf(buffer, sizeof(buffer), "  angle_cmd: %d.%d deg\r\n",
+                (int)(angle_cmd_deg_x10/10), abs((int)(angle_cmd_deg_x10%10)));
+        cli_send_string(buffer);
+    }
+    
+    snprintf(buffer, sizeof(buffer), "  inverted: %s\r\n", mod->drive_inverted ? "yes" : "no");
+    cli_send_string(buffer);
+    
+    // Show kinematic output if available
+    SKM_Out out;
+    skm_update_100Hz(&swerve_kin, &out);
+    int32_t v_cmd_x100 = (int32_t)(out.speed_mps[module_idx] * 100);
+    int32_t ang_cmd_deg_x10 = (int32_t)(out.angle_rad[module_idx] * 1800.0f / 3.14159f);
+    snprintf(buffer, sizeof(buffer), "  v_cmd: %d.%02d m/s (scaled by %d.%02d)\r\n",
+            (int)(v_cmd_x100/100), abs((int)(v_cmd_x100%100)),
+            (int)(out.scale_factor*100/100), abs((int)(out.scale_factor*100%100)));
+    cli_send_string(buffer);
+    snprintf(buffer, sizeof(buffer), "  angle_target: %d.%d deg (from kinematics)\r\n",
+            (int)(ang_cmd_deg_x10/10), abs((int)(ang_cmd_deg_x10%10)));
+    cli_send_string(buffer);
+    
+    int32_t v_actual_x100 = (int32_t)(swerve_module_get_current_velocity(mod) * 100);
+    snprintf(buffer, sizeof(buffer), "  v_actual: %d.%02d m/s\r\n",
+            (int)(v_actual_x100/100), abs((int)(v_actual_x100%100)));
+    cli_send_string(buffer);
+}
+
+static void cmd_kin(void)
+{
+    char buffer[100];
+    
+    init_swerve_modules();
+    
+    if (arg_count == 1 || (arg_count == 2 && strcmp(args[1], "help") == 0))
+    {
+        cli_send_string("Kinematics Commands:\r\n");
+        cli_send_string("  kin show                    - Show current module positions\r\n");
+        cli_send_string("  kin setpos <mod> <x> <y>    - Set module position (meters)\r\n");
+        cli_send_string("  kin limits                  - Show velocity and acceleration limits\r\n");
+        cli_send_string("\r\nModules: fr, fl, r\r\n");
+        cli_send_string("Examples:\r\n");
+        cli_send_string("  kin show                - Show all positions\r\n");
+        cli_send_string("  kin setpos fr 0.3 -0.2  - Set FR at (0.3, -0.2) m\r\n");
+        return;
+    }
+    
+    if (arg_count >= 2 && strcmp(args[1], "show") == 0)
+    {
+        cli_send_string("Module Positions (from robot center):\r\n");
+        
+        const char* mod_names[] = {"FR", "FL", "R"};
+        for (int i = 0; i < 3; i++)
+        {
+            float x = swerve_kin.cfg.x[i];
+            float y = swerve_kin.cfg.y[i];
+            
+            int32_t x_x1000 = (int32_t)(x * 1000);
+            int32_t y_x1000 = (int32_t)(y * 1000);
+            
+            snprintf(buffer, sizeof(buffer), "  %s: (%d.%03d, %d.%03d) m\r\n", 
+                    mod_names[i],
+                    (int)(x_x1000/1000), abs((int)(x_x1000%1000)),
+                    (int)(y_x1000/1000), abs((int)(y_x1000%1000)));
+            cli_send_string(buffer);
+        }
+        return;
+    }
+    
+    if (arg_count >= 2 && strcmp(args[1], "limits") == 0)
+    {
+        cli_send_string("Minimal Kinematics - No built-in limits\r\n");
+        cli_send_string("Limits are handled by individual swerve modules:\r\n");
+        cli_send_string("  - Steering limits: ±150° (mechanical)\r\n");
+        cli_send_string("  - Drive limits: Set per module in swerve init\r\n");
+        cli_send_string("  - Use 'swerve <module> info' for module-specific limits\r\n");
+        return;
+    }
+    
+    if (arg_count >= 5 && strcmp(args[1], "setpos") == 0)
+    {
+        int module_idx = -1;
+        if (strcmp(args[2], "fr") == 0) module_idx = 0;
+        else if (strcmp(args[2], "fl") == 0) module_idx = 1;
+        else if (strcmp(args[2], "r") == 0) module_idx = 2;
+        
+        if (module_idx < 0)
+        {
+            cli_send_string("Invalid module. Use: fr, fl, r\r\n");
+            return;
+        }
+        
+        float x = atof(args[3]);
+        float y = atof(args[4]);
+        
+        // Update the kinematics config directly
+        swerve_kin.cfg.x[module_idx] = x;
+        swerve_kin.cfg.y[module_idx] = y;
+        
+        int32_t x_x1000 = (int32_t)(x * 1000);
+        int32_t y_x1000 = (int32_t)(y * 1000);
+        
+        snprintf(buffer, sizeof(buffer), "Module %s position set to (%d.%03d, %d.%03d) m\r\n", 
+                args[2],
+                (int)(x_x1000/1000), abs((int)(x_x1000%1000)),
+                (int)(y_x1000/1000), abs((int)(y_x1000%1000)));
+        cli_send_string(buffer);
+        return;
+    }
+    
+    cli_send_string("Usage: kin show/limits or kin setpos <module> <x> <y>\r\n");
 }

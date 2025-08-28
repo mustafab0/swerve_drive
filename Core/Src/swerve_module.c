@@ -91,28 +91,50 @@ void swerve_module_set_angle_abs(SwerveModule* m, float angle_rad){
     float target = wrap_pi(angle_rad);
     float current = swerve_module_get_angle_abs(m);
 
-    // Shortest-path delta with drive inversion trick for >90° moves
-    float delta = wrap_pi(target - current); // in (-pi,pi]
+    // Calculate both possible targets (normal and flipped)
+    float target_normal = target;
+    float target_flipped = wrap_pi(target + (float)M_PI);
     
-    // Check if we should flip 180° and invert drive for shorter path
-    if (fabsf(delta) > (float)M_PI / 2.0f) {
-        // Flip target by 180° and invert drive
-        target = wrap_pi(target + (float)M_PI);
-        delta = wrap_pi(target - current);
-        m->drive_inverted = 1;
+    // Calculate deltas for both options
+    float delta_normal = wrap_pi(target_normal - current);
+    float delta_flipped = wrap_pi(target_flipped - current);
+    
+    // Check which targets are within physical limits
+    bool normal_valid = (target_normal >= -limit && target_normal <= limit);
+    bool flipped_valid = (target_flipped >= -limit && target_flipped <= limit);
+    
+    // Choose the best option considering both limits and shortest path
+    float final_target;
+    uint8_t drive_inverted;
+    
+    if (normal_valid && flipped_valid) {
+        // Both options valid, choose shortest path
+        if (fabsf(delta_normal) <= fabsf(delta_flipped)) {
+            final_target = target_normal;
+            drive_inverted = 0;
+        } else {
+            final_target = target_flipped;
+            drive_inverted = 1;
+        }
+    } else if (normal_valid) {
+        // Only normal target is valid
+        final_target = target_normal;
+        drive_inverted = 0;
+    } else if (flipped_valid) {
+        // Only flipped target is valid
+        final_target = target_flipped;
+        drive_inverted = 1;
     } else {
-        m->drive_inverted = 0;
+        // Neither target is valid, clamp normal target to limits
+        final_target = clampf(target_normal, -limit, limit);
+        drive_inverted = 0;
     }
     
-    // Enforce physical limits on the final target
-    if (target > limit) target = limit;
-    if (target < -limit) target = -limit;
-    
-    // Store command for status
-    m->angle_cmd_rad = target;
+    m->drive_inverted = drive_inverted;
+    m->angle_cmd_rad = final_target;
     
     // Convert to motor steps and move
-    int32_t target_steps = m->steer_zero_offset_steps + (int32_t)(target * m->steer_steps_per_rad);
+    int32_t target_steps = m->steer_zero_offset_steps + (int32_t)(final_target * m->steer_steps_per_rad);
     int32_t current_steps = m->steer_zero_offset_steps + motor_get_position_steps(m->steer);
     int32_t steps_to_move = target_steps - current_steps;
     
