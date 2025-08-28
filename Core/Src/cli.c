@@ -1113,10 +1113,30 @@ void twist_timeout_check(void)
     }
 }
 
+// Check if all swerve modules are at their target steering angles
+bool all_modules_at_target_angle(void)
+{
+    SwerveModule* modules[] = {&swerve_fr, &swerve_fl, &swerve_r};
+    for (int i = 0; i < 3; i++) {
+        if (modules[i] && modules[i]->is_homed) {
+            if (!swerve_module_is_at_angle(modules[i])) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 bool twist_should_send_commands(void)
 {
-    // With simple timeout implementation, always send commands
+    // Always send commands (this function kept for compatibility)
     return true;
+}
+
+bool twist_should_send_drive_commands(void)
+{
+    // Only send drive commands after all modules reach target angles
+    return all_modules_at_target_angle();
 }
 
 // Function to run kinematics at 100Hz and send to modules

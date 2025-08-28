@@ -14,5 +14,6 @@ void cli_print_prompt(void);
 // Twist timeout functions (called from 100Hz control loop)
 void twist_timeout_check(void);
 bool twist_should_send_commands(void);
+bool twist_should_send_drive_commands(void);
 
 #endif
