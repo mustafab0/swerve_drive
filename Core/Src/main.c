@@ -29,6 +29,7 @@
 #include "../Inc/swerve_kinematics.h"
 #include "telemetry.h"
 #include "app_timers.h"
+#include "watchdog.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -218,6 +219,9 @@ int main(void)
   
   // Initialize system timers (including TIM6 @ 5kHz)
   app_timers_init();
+  
+  // Initialize watchdog with 500ms timeout - must be last init
+  watchdog_init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -227,6 +231,9 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    // Check software watchdog timeout
+    watchdog_check_timeout();
+    
     cli_process();
     
     // Poll all motor counters at ~100-200 Hz (limited by CLI processing time)
@@ -1064,6 +1071,9 @@ static void MX_GPIO_Init(void)
 // Called by app_timers.c at 5kHz from TIM6 ISR
 void motor_tick_all_5k(void)
 {
+  // Update watchdog TIM6 heartbeat
+  watchdog_tim6_heartbeat();
+  
   // Static counter for 100Hz control loop (5000Hz / 50 = 100Hz)
   static uint32_t control_counter = 0;
   
@@ -1090,6 +1100,9 @@ void motor_tick_all_5k(void)
 // 100Hz control loop with telemetry sampling
 void control_loop_100Hz(void)
 {
+  // Reset watchdog health flags at start of each loop
+  watchdog_reset_health_flags();
+  
   // 1) Poll all motor counters for position feedback
   motor_poll_counter(&m0);  // FR steer
   motor_poll_counter(&m1);  // FR drive
@@ -1098,6 +1111,9 @@ void control_loop_100Hz(void)
   motor_poll_counter(&m4);  // R steer
   motor_poll_counter(&m5);  // R drive
   
+  // Mark motor polling as complete
+  watchdog_set_motor_polling_ok();
+  
   // 2) Check for twist command timeout
   twist_timeout_check();
   
@@ -1105,7 +1121,7 @@ void control_loop_100Hz(void)
   SKM_Out kin_out;
   skm_update_100Hz(&swerve_kin, &kin_out);
   
-  // 3) Send computed angles and speeds to swerve modules
+  // 4) Send computed angles and speeds to swerve modules
   if (twist_should_send_commands()) {
     SwerveModule* modules[] = {&swerve_fr, &swerve_fl, &swerve_r};
     for (int i = 0; i < 3; i++) {
@@ -1123,6 +1139,10 @@ void control_loop_100Hz(void)
       }
     }
   }
+  
+  // Mark swerve module updates and kinematics as complete
+  watchdog_set_swerve_update_ok();
+  watchdog_set_kinematics_ok();
   
   // 4) Sample telemetry data (after all updates)
   if (telemetry_is_enabled()) {
@@ -1163,6 +1183,10 @@ void control_loop_100Hz(void)
     
     telemetry_sample(&sample);
   }
+  
+  // All critical operations complete - conditionally kick watchdog
+  // Only kicks if all health flags are set (motor polling, swerve updates, kinematics, TIM6 heartbeat)
+  watchdog_conditional_kick();
 }
 
 /* USER CODE END 4 */

@@ -5,6 +5,7 @@
 #include "../Inc/swerve_kinematics.h"
 #include "app_timers.h"
 #include "telemetry.h"
+#include "watchdog.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,6 +49,7 @@ static void cmd_stepgen(void);
 static void cmd_motor(void);
 static void cmd_tick(void);
 static void cmd_pc(void);
+static void cmd_wdog(void);
 static void cmd_swerve(void);
 static void cmd_twist(void);
 static void cmd_mod(void);
@@ -75,7 +77,8 @@ static const command_t commands[] = {
     {"kin", cmd_kin, "Kinematics config: kin setpos <module> <x> <y> or kin show"},
     {"telem", cmd_telem, "Telemetry control: telem on/off/status"},
     {"tick", cmd_tick, "Show TIM6 5kHz ISR diagnostics and performance"},
-    {"pc", cmd_pc, "Show pulse counts: pc [motor_id] or pc all"}
+    {"pc", cmd_pc, "Show pulse counts: pc [motor_id] or pc all"},
+    {"wdog", cmd_wdog, "Watchdog status: wdog status"}
 };
 
 #define NUM_COMMANDS (sizeof(commands) / sizeof(commands[0]))
@@ -1599,4 +1602,51 @@ static void cmd_telem(void)
     }
     
     cli_send_string("Usage: telem on/off/status/help or telem fault <message>\r\n");
+}
+
+static void cmd_wdog(void)
+{
+    if (arg_count >= 2 && strcmp(args[1], "status") == 0) {
+        const WatchdogHealth* health = watchdog_get_health_status();
+        char buffer[200];
+        
+        cli_send_string("Watchdog Health Status:\r\n");
+        
+        snprintf(buffer, sizeof(buffer), "  Motor polling:      %s\r\n", 
+                health->motor_polling_ok ? "OK" : "FAILED");
+        cli_send_string(buffer);
+        
+        snprintf(buffer, sizeof(buffer), "  Swerve updates:     %s\r\n", 
+                health->swerve_update_ok ? "OK" : "FAILED");
+        cli_send_string(buffer);
+        
+        snprintf(buffer, sizeof(buffer), "  Kinematics:         %s\r\n", 
+                health->kinematics_ok ? "OK" : "FAILED");
+        cli_send_string(buffer);
+        
+        snprintf(buffer, sizeof(buffer), "  TIM6 heartbeat:     %s\r\n", 
+                health->tim6_heartbeat_ok ? "OK" : "FAILED");
+        cli_send_string(buffer);
+        
+        bool all_healthy = health->motor_polling_ok && 
+                          health->swerve_update_ok && 
+                          health->kinematics_ok && 
+                          health->tim6_heartbeat_ok;
+        
+        snprintf(buffer, sizeof(buffer), "  Overall status:     %s\r\n", 
+                all_healthy ? "HEALTHY (watchdog kicked)" : "UNHEALTHY (no kick)");
+        cli_send_string(buffer);
+        
+        cli_send_string("  Watchdog timeout:   500ms (software-based)\r\n");
+        return;
+    }
+    
+    if (arg_count >= 2 && strcmp(args[1], "help") == 0) {
+        cli_send_string("Watchdog Commands:\r\n");
+        cli_send_string("  wdog status  - Show health status and kick behavior\r\n");
+        cli_send_string("  wdog help    - Show this help\r\n");
+        return;
+    }
+    
+    cli_send_string("Usage: wdog status/help\r\n");
 }
