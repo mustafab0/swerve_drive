@@ -9,10 +9,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-// Constants from the original header
-#define SWERVE_STEER_GEAR_RATIO    3.0f
-#define SWERVE_DRIVE_GEAR_RATIO    3.0f
-#define SWERVE_WHEEL_RADIUS_M      0.15f
+// Constants from the header file - remove redefinition to avoid warning
 
 
 static inline float wrap_pi(float x){

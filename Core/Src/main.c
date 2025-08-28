@@ -25,6 +25,9 @@
 #include "cli.h"
 #include "stepgen.h"
 #include "motor.h"
+#include "swerve_module.h"
+#include "../Inc/swerve_kinematics.h"
+#include "telemetry.h"
 #include "app_timers.h"
 /* USER CODE END Includes */
 
@@ -83,6 +86,10 @@ Motor m5;  // R drive
 // Legacy test motor (will remove later)
 Motor motor_test;
 
+// External references from cli.c
+extern SwerveModule swerve_fr, swerve_fl, swerve_r;
+extern SKM_State swerve_kin;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -104,7 +111,7 @@ static void MX_TIM12_Init(void);
 static void MX_TIM13_Init(void);
 static void MX_TIM14_Init(void);
 /* USER CODE BEGIN PFP */
-
+void control_loop_100Hz(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -1057,6 +1064,9 @@ static void MX_GPIO_Init(void)
 // Called by app_timers.c at 5kHz from TIM6 ISR
 void motor_tick_all_5k(void)
 {
+  // Static counter for 100Hz control loop (5000Hz / 50 = 100Hz)
+  static uint32_t control_counter = 0;
+  
   // Tick all 6 motors in swerve drive system - 5kHz is only for motor ramps
   motor_tick_accel(&m0);  // FR steer
   motor_tick_accel(&m1);  // FR drive
@@ -1064,6 +1074,81 @@ void motor_tick_all_5k(void)
   motor_tick_accel(&m3);  // FL drive
   motor_tick_accel(&m4);  // R steer
   motor_tick_accel(&m5);  // R drive
+  
+  // Run 100Hz control loop (every 50 ticks of 5kHz)
+  control_counter++;
+  if (control_counter >= 50)
+  {
+    control_counter = 0;
+    control_loop_100Hz();
+  }
+  
+  // Process telemetry UART (can be called at 5kHz, won't block)
+  telemetry_process_uart();
+}
+
+// 100Hz control loop with telemetry sampling
+void control_loop_100Hz(void)
+{
+  // 1) Poll all motor counters for position feedback
+  motor_poll_counter(&m0);  // FR steer
+  motor_poll_counter(&m1);  // FR drive
+  motor_poll_counter(&m2);  // FL steer
+  motor_poll_counter(&m3);  // FL drive
+  motor_poll_counter(&m4);  // R steer
+  motor_poll_counter(&m5);  // R drive
+  
+  // 2) Run kinematics with slew limiting and scaling
+  SKM_Out kin_out;
+  skm_update_100Hz(&swerve_kin, &kin_out);
+  
+  // 3) Send computed angles and speeds to swerve modules
+  SwerveModule* modules[] = {&swerve_fr, &swerve_fl, &swerve_r};
+  for (int i = 0; i < 3; i++) {
+    if (modules[i] && modules[i]->is_homed) {
+      swerve_module_set_angle_abs(modules[i], kin_out.angle_rad[i]);
+      swerve_module_set_wheel_speed(modules[i], kin_out.speed_mps[i]);
+    }
+  }
+  
+  // 4) Sample telemetry data (after all updates)
+  if (telemetry_is_enabled()) {
+    TelemetrySample sample = {0};
+    
+    // Timestamp and chassis data
+    sample.timestamp_ms = HAL_GetTick();
+    sample.vx_cmd = swerve_kin.vx_cmd;
+    sample.vy_cmd = swerve_kin.vy_cmd;
+    sample.wz_cmd = swerve_kin.wz_cmd;
+    sample.vx_actual = swerve_kin.vx_cmd;  // No slew limiting - actual equals commanded
+    sample.vy_actual = swerve_kin.vy_cmd;
+    sample.wz_actual = swerve_kin.wz_cmd;
+    sample.scale_factor = kin_out.scale_factor;
+    
+    // Per-module data
+    for (int i = 0; i < 3; i++) {
+      SwerveModule* mod = modules[i];
+      TelemetryModuleData* telem_mod = &sample.modules[i];
+      
+      if (mod && mod->is_homed) {
+        telem_mod->ang_now_deg = swerve_module_get_angle_abs(mod) * 180.0f / 3.14159f;
+        telem_mod->ang_cmd_deg = mod->angle_cmd_rad * 180.0f / 3.14159f;
+        telem_mod->v_cmd_mps = kin_out.speed_mps[i];
+        telem_mod->drive_sps = motor_get_velocity_sps(mod->drive);
+        telem_mod->pos_steps_drive = motor_get_position_steps(mod->drive);
+        telem_mod->pos_steps_steer = motor_get_position_steps(mod->steer);
+        telem_mod->inv = mod->drive_inverted;
+        
+        // Simple flag detection
+        telem_mod->flags = 0;
+        if (motor_is_busy(mod->steer)) telem_mod->flags |= TELEM_FLAG_TICK_WHILE_IDLE;
+        if (fabsf(telem_mod->ang_now_deg) > 140.0f) telem_mod->flags |= TELEM_FLAG_STEER_LIMIT;
+        if (kin_out.scale_factor < 0.99f) telem_mod->flags |= TELEM_FLAG_DRIVE_SATURATED;
+      }
+    }
+    
+    telemetry_sample(&sample);
+  }
 }
 
 /* USER CODE END 4 */

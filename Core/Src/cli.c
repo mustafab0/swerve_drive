@@ -4,6 +4,7 @@
 #include "swerve_module.h"
 #include "../Inc/swerve_kinematics.h"
 #include "app_timers.h"
+#include "telemetry.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,6 +47,7 @@ static void cmd_swerve(void);
 static void cmd_twist(void);
 static void cmd_mod(void);
 static void cmd_kin(void);
+static void cmd_telem(void);
 
 typedef struct {
     const char* name;
@@ -66,6 +68,7 @@ static const command_t commands[] = {
     {"twist", cmd_twist, "Control robot body twist: twist <vx> <vy> <wz> or twist stop"},
     {"mod", cmd_mod, "Module status: mod <i> stat"},
     {"kin", cmd_kin, "Kinematics config: kin setpos <module> <x> <y> or kin show"},
+    {"telem", cmd_telem, "Telemetry control: telem on/off/status"},
     {"tick", cmd_tick, "Show TIM6 5kHz ISR diagnostics and performance"},
     {"pc", cmd_pc, "Show pulse counts: pc [motor_id] or pc all"}
 };
@@ -76,6 +79,10 @@ void cli_init(void)
 {
     cli_send_string("\r\n=== Swerve Drive Controller ===\r\n");
     cli_send_string("Type 'help' for available commands\r\n");
+    
+    // Initialize telemetry system
+    telemetry_init();
+    
     cli_print_prompt();
 }
 
@@ -751,18 +758,12 @@ static void init_swerve_modules(void)
     
     swerve_modules_initialized = true;
     
-    // Initialize kinematics system with slew limiting
+    // Initialize kinematics system
     if (!kinematics_initialized) {
         SKM_Config cfg = {
             .x = {0.1950f, 0.1950f, -0.1950f},      // FR, FL, R positions (x)
             .y = {-0.1925f, 0.1925f, 0.0000f},      // FR, FL, R positions (y)
-            .vx_max = 2.0f,                          // Max chassis forward speed
-            .vy_max = 2.0f,                          // Max chassis sideways speed  
-            .wz_max = 3.0f,                          // Max yaw rate
-            .v_module_max = 2.0f,                    // Max individual wheel speed
-            .dvx_max = 0.050f,                       // 5 m/s² forward accel limit
-            .dvy_max = 0.050f,                       // 5 m/s² sideways accel limit
-            .dwz_max = 0.100f                        // 10 rad/s² yaw accel limit
+            .v_module_max = 2.0f                     // Max individual wheel speed
         };
         skm_init(&swerve_kin, &cfg);
         kinematics_initialized = true;
@@ -776,6 +777,7 @@ static SwerveModule* get_swerve_module(const char* name)
     if (strcmp(name, "fr") == 0) return &swerve_fr;
     if (strcmp(name, "fl") == 0) return &swerve_fl;
     if (strcmp(name, "r") == 0) return &swerve_r;
+    
     return NULL;
 }
 
@@ -815,7 +817,7 @@ static void cmd_swerve(void)
     // Handle "all" modules
     if (strcmp(args[1], "all") == 0)
     {
-        init_swerve_modules();
+        init_swerve_modules();  // Ensure modules are initialized
         SwerveModule* modules[] = {&swerve_fr, &swerve_fl, &swerve_r};
         const char* names[] = {"FR", "FL", "R"};
         
@@ -1116,7 +1118,7 @@ static void update_twist_kinematics(void)
     
     // Show slewing and scaling info
     int32_t vx_cmd_x100 = (int32_t)(swerve_kin.vx_cmd * 100);
-    int32_t vx_actual_x100 = (int32_t)(swerve_kin.vx * 100);
+    int32_t vx_actual_x100 = (int32_t)(swerve_kin.vx_cmd * 100);  // No slew limiting
     int32_t scale_x100 = (int32_t)(out.scale_factor * 100);
     
     snprintf(buffer, sizeof(buffer), "Slewing: vx_cmd=%d.%02d, vx_actual=%d.%02d, scale=%d.%02d\r\n",
@@ -1180,9 +1182,9 @@ static void cmd_twist(void)
         int32_t vy_cmd_x100 = (int32_t)(swerve_kin.vy_cmd * 100);
         int32_t wz_cmd_x100 = (int32_t)(swerve_kin.wz_cmd * 100);
         
-        int32_t vx_actual_x100 = (int32_t)(swerve_kin.vx * 100);
-        int32_t vy_actual_x100 = (int32_t)(swerve_kin.vy * 100);
-        int32_t wz_actual_x100 = (int32_t)(swerve_kin.wz * 100);
+        int32_t vx_actual_x100 = (int32_t)(swerve_kin.vx_cmd * 100);  // No slew limiting
+        int32_t vy_actual_x100 = (int32_t)(swerve_kin.vy_cmd * 100);  // No slew limiting
+        int32_t wz_actual_x100 = (int32_t)(swerve_kin.wz_cmd * 100);  // No slew limiting
         
         snprintf(buffer, sizeof(buffer), "Twist Commands:\r\n");
         cli_send_string(buffer);
@@ -1290,7 +1292,7 @@ static void cmd_mod(void)
     int32_t ang_cmd_deg_x10 = (int32_t)(out.angle_rad[module_idx] * 1800.0f / 3.14159f);
     snprintf(buffer, sizeof(buffer), "  v_cmd: %d.%02d m/s (scaled by %d.%02d)\r\n",
             (int)(v_cmd_x100/100), abs((int)(v_cmd_x100%100)),
-            (int)(out.scale_factor*100/100), abs((int)(out.scale_factor*100%100)));
+            (int)(out.scale_factor*100/100), abs((int)((int)(out.scale_factor*100)%100)));
     cli_send_string(buffer);
     snprintf(buffer, sizeof(buffer), "  angle_target: %d.%d deg (from kinematics)\r\n",
             (int)(ang_cmd_deg_x10/10), abs((int)(ang_cmd_deg_x10%10)));
@@ -1385,4 +1387,73 @@ static void cmd_kin(void)
     }
     
     cli_send_string("Usage: kin show/limits or kin setpos <module> <x> <y>\r\n");
+}
+
+static void cmd_telem(void)
+{
+    char buffer[100];
+    
+    if (arg_count == 1 || (arg_count == 2 && strcmp(args[1], "help") == 0))
+    {
+        cli_send_string("Telemetry Commands:\r\n");
+        cli_send_string("  telem on                    - Enable 10Hz CSV telemetry output\r\n");
+        cli_send_string("  telem off                   - Disable telemetry\r\n");
+        cli_send_string("  telem status                - Show telemetry status\r\n");
+        cli_send_string("  telem fault <message>       - Emit immediate fault message\r\n");
+        cli_send_string("\r\nOutput Format (CSV):\r\n");
+        cli_send_string("timestamp_ms,chassis_twist(6),per_module_data(8x3)\r\n");
+        cli_send_string("Includes: angles, speeds, motor positions, flags\r\n");
+        cli_send_string("Non-blocking UART DMA output at 10Hz\r\n");
+        return;
+    }
+    
+    if (arg_count >= 2 && strcmp(args[1], "on") == 0)
+    {
+        telemetry_enable(true);
+        cli_send_string("Telemetry enabled - 10Hz CSV output started\r\n");
+        cli_send_string("CSV header will be sent on first sample\r\n");
+        return;
+    }
+    
+    if (arg_count >= 2 && strcmp(args[1], "off") == 0)
+    {
+        telemetry_enable(false);
+        cli_send_string("Telemetry disabled\r\n");
+        return;
+    }
+    
+    if (arg_count >= 2 && strcmp(args[1], "status") == 0)
+    {
+        snprintf(buffer, sizeof(buffer), "Telemetry Status:\r\n");
+        cli_send_string(buffer);
+        snprintf(buffer, sizeof(buffer), "  Enabled: %s\r\n", 
+                telemetry_is_enabled() ? "YES" : "NO");
+        cli_send_string(buffer);
+        snprintf(buffer, sizeof(buffer), "  Sample Rate: %d Hz\r\n", TELEMETRY_SAMPLE_RATE_HZ);
+        cli_send_string(buffer);
+        snprintf(buffer, sizeof(buffer), "  Output Rate: %d Hz\r\n", TELEMETRY_OUTPUT_RATE_HZ);
+        cli_send_string(buffer);
+        snprintf(buffer, sizeof(buffer), "  Buffer Size: %d bytes\r\n", TELEMETRY_UART_RING_SIZE);
+        cli_send_string(buffer);
+        return;
+    }
+    
+    if (arg_count >= 3 && strcmp(args[1], "fault") == 0)
+    {
+        // Concatenate remaining arguments as fault message
+        char fault_msg[128] = {0};
+        int pos = 0;
+        for (int i = 2; i < arg_count && pos < sizeof(fault_msg) - 1; i++) {
+            if (i > 2) fault_msg[pos++] = ' ';
+            strncpy(&fault_msg[pos], args[i], sizeof(fault_msg) - pos - 1);
+            pos += strlen(args[i]);
+        }
+        
+        telemetry_emit_fault(fault_msg);
+        snprintf(buffer, sizeof(buffer), "Fault message emitted: %s\r\n", fault_msg);
+        cli_send_string(buffer);
+        return;
+    }
+    
+    cli_send_string("Usage: telem on/off/status/help or telem fault <message>\r\n");
 }

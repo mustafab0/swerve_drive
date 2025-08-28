@@ -1,4 +1,4 @@
-// swerve_kinematics.c — with slew limiting and chassis limits
+// swerve_kinematics.c — 3-module swerve kinematics with scaling
 #include "../Inc/swerve_kinematics.h"
 #include <math.h>
 #include <string.h>
@@ -24,38 +24,28 @@ void skm_init(SKM_State* state, const SKM_Config* cfg) {
 // Copy config
 state->cfg = *cfg;
 
-// Initialize state to zero
+// Initialize commands to zero
 state->vx_cmd = state->vy_cmd = state->wz_cmd = 0.0f;
-state->vx = state->vy = state->wz = 0.0f;
 }
 
 
 void skm_update_100Hz(SKM_State* state, SKM_Out* out) {
 const SKM_Config* cfg = &state->cfg;
 
-// 1) Clamp commanded targets to hard chassis limits
-float vx_t = clampf(state->vx_cmd, -cfg->vx_max, cfg->vx_max);
-float vy_t = clampf(state->vy_cmd, -cfg->vy_max, cfg->vy_max);
-float wz_t = clampf(state->wz_cmd, -cfg->wz_max, cfg->wz_max);
+// Use commanded values directly (no slew limiting)
+float vx = state->vx_cmd;
+float vy = state->vy_cmd; 
+float wz = state->wz_cmd;
 
-// 2) Slew toward targets with acceleration limits (per 0.01s tick)
-float dvx = clampf(vx_t - state->vx, -cfg->dvx_max, cfg->dvx_max);
-float dvy = clampf(vy_t - state->vy, -cfg->dvy_max, cfg->dvy_max);
-float dwz = clampf(wz_t - state->wz, -cfg->dwz_max, cfg->dwz_max);
-
-state->vx += dvx;
-state->vy += dvy;
-state->wz += dwz;
-
-// 3) Compute per-module kinematics with slewed values
+// Compute per-module kinematics
 float max_speed = 0.0f;
 
 for (int i = 0; i < 3; i++) {
-    // Tangential velocity from body yaw rate at module position
-    float tx = state->wz * cfg->y[i];
-    float ty = state->wz * cfg->x[i];
-    float Vx = state->vx + tx;
-    float Vy = state->vy + ty;
+    // Tangential velocity from body yaw rate at module position  
+    float tx = wz * cfg->y[i];
+    float ty = wz * cfg->x[i];
+    float Vx = vx + tx;
+    float Vy = vy + ty;
     
     out->angle_rad[i] = wrap_pi(atan2f(Vy, Vx)); // desired wheel heading
     out->speed_mps[i] = hypot2f(Vx, Vy); // wheel linear speed (>=0)
@@ -66,7 +56,7 @@ for (int i = 0; i < 3; i++) {
     }
 }
 
-// 4) Uniform scaling: if any wheel exceeds max, scale all down proportionally
+// Uniform scaling: if any wheel exceeds max, scale all down proportionally
 out->scale_factor = 1.0f;
 if (max_speed > cfg->v_module_max) {
     out->scale_factor = cfg->v_module_max / max_speed;

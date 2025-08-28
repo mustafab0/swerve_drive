@@ -1,4 +1,4 @@
-// swerve_kinematics.h — 3‑module swerve kinematics with slew limiting and scaling
+// swerve_kinematics.h — 3‑module swerve kinematics with scaling
 #pragma once
 #include <stdint.h>
 #ifdef __cplusplus
@@ -13,25 +13,15 @@ float x[3];
 float y[3];
 
 // Chassis limits
-float vx_max;          // Max forward/backward speed (m/s)
-float vy_max;          // Max left/right speed (m/s)  
-float wz_max;          // Max yaw rate (rad/s)
 float v_module_max;    // Max individual wheel speed (m/s)
-
-// Acceleration limits (per 0.01s tick at 100Hz)
-float dvx_max;         // Max vx change per tick (m/s per tick)
-float dvy_max;         // Max vy change per tick (m/s per tick)
-float dwz_max;         // Max wz change per tick (rad/s per tick)
 } SKM_Config;
 
 
-// State for slew limiting
+// State for kinematics
 typedef struct {
 SKM_Config cfg;
-// User-commanded targets
+// User-commanded twist values
 float vx_cmd, vy_cmd, wz_cmd;
-// Slew-limited actual values used for computation
-float vx, vy, wz;
 } SKM_State;
 
 
@@ -53,7 +43,7 @@ state->vy_cmd = vy;
 state->wz_cmd = wz;
 }
 
-// Update at 100Hz - applies slew limiting and computes wheel targets
+// Update kinematics - computes wheel targets from twist commands
 void skm_update_100Hz(SKM_State* state, SKM_Out* out);
 
 
