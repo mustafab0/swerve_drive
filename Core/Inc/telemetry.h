@@ -82,6 +82,9 @@ void telemetry_process_uart(void);
 // Emit immediate fault message
 void telemetry_emit_fault(const char* fault_msg);
 
+// Get the latest telemetry sample (for CLI display)
+const TelemetrySample* telemetry_get_latest_sample(void);
+
 // Fast float-to-string conversion (3 decimal places)
 int ftoa_fast(float value, char* buffer, int decimals);
 

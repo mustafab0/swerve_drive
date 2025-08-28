@@ -1399,6 +1399,8 @@ static void cmd_telem(void)
         cli_send_string("  telem on                    - Enable 10Hz CSV telemetry output\r\n");
         cli_send_string("  telem off                   - Disable telemetry\r\n");
         cli_send_string("  telem status                - Show telemetry status\r\n");
+        cli_send_string("  telem show                  - Show latest telemetry data (human readable)\r\n");
+        cli_send_string("  telem test                  - Manually capture and show telemetry sample\r\n");
         cli_send_string("  telem fault <message>       - Emit immediate fault message\r\n");
         cli_send_string("\r\nOutput Format (CSV):\r\n");
         cli_send_string("timestamp_ms,chassis_twist(6),per_module_data(8x3)\r\n");
@@ -1435,6 +1437,90 @@ static void cmd_telem(void)
         cli_send_string(buffer);
         snprintf(buffer, sizeof(buffer), "  Buffer Size: %d bytes\r\n", TELEMETRY_UART_RING_SIZE);
         cli_send_string(buffer);
+        return;
+    }
+    
+    if (arg_count == 2 && strcmp(args[1], "show") == 0)
+    {
+        const TelemetrySample* sample = telemetry_get_latest_sample();
+        
+        cli_send_string("Latest Telemetry Sample:\r\n");
+        snprintf(buffer, sizeof(buffer), "Timestamp: %lu ms\r\n", sample->timestamp_ms);
+        cli_send_string(buffer);
+        
+        // Chassis twist
+        snprintf(buffer, sizeof(buffer), "Chassis - Cmd: vx=%.3f, vy=%.3f, wz=%.3f\r\n", 
+                sample->vx_cmd, sample->vy_cmd, sample->wz_cmd);
+        cli_send_string(buffer);
+        snprintf(buffer, sizeof(buffer), "Chassis - Act: vx=%.3f, vy=%.3f, wz=%.3f, scale=%.3f\r\n", 
+                sample->vx_actual, sample->vy_actual, sample->wz_actual, sample->scale_factor);
+        cli_send_string(buffer);
+        
+        // Per-module data
+        const char* names[] = {"FR", "FL", "R"};
+        for (int i = 0; i < 3; i++) {
+            const TelemetryModuleData* mod = &sample->modules[i];
+            snprintf(buffer, sizeof(buffer), "%s: ang=%.1f° (cmd=%.1f°), vel=%.3f m/s, drive=%ld sps\r\n",
+                    names[i], mod->ang_now_deg, mod->ang_cmd_deg, mod->v_cmd_mps, mod->drive_sps);
+            cli_send_string(buffer);
+            
+            snprintf(buffer, sizeof(buffer), "   pos_drive=%ld, pos_steer=%ld, inv=%u, flags=0x%02X\r\n",
+                    mod->pos_steps_drive, mod->pos_steps_steer, mod->inv, mod->flags);
+            cli_send_string(buffer);
+        }
+        return;
+    }
+    
+    if (arg_count == 2 && strcmp(args[1], "test") == 0)
+    {
+        // Manually create a telemetry sample to test the system
+        init_swerve_modules();
+        
+        cli_send_string("Manually capturing telemetry sample...\r\n");
+        
+        TelemetrySample sample = {0};
+        
+        // Run kinematics to get current state
+        SKM_Out kin_out;
+        skm_update_100Hz(&swerve_kin, &kin_out);
+        
+        // Build telemetry sample manually (same logic as in main.c)
+        sample.timestamp_ms = HAL_GetTick();
+        sample.vx_cmd = swerve_kin.vx_cmd;
+        sample.vy_cmd = swerve_kin.vy_cmd;
+        sample.wz_cmd = swerve_kin.wz_cmd;
+        sample.vx_actual = swerve_kin.vx_cmd;  // No slew limiting
+        sample.vy_actual = swerve_kin.vy_cmd;
+        sample.wz_actual = swerve_kin.wz_cmd;
+        sample.scale_factor = kin_out.scale_factor;
+        
+        // Per-module data
+        SwerveModule* modules[] = {&swerve_fr, &swerve_fl, &swerve_r};
+        for (int i = 0; i < 3; i++) {
+            SwerveModule* mod = modules[i];
+            TelemetryModuleData* telem_mod = &sample.modules[i];
+            
+            if (mod && mod->is_homed) {
+                telem_mod->ang_now_deg = swerve_module_get_angle_abs(mod) * 180.0f / 3.14159f;
+                telem_mod->ang_cmd_deg = mod->angle_cmd_rad * 180.0f / 3.14159f;
+                telem_mod->v_cmd_mps = kin_out.speed_mps[i];
+                telem_mod->drive_sps = motor_get_velocity_sps(mod->drive);
+                telem_mod->pos_steps_drive = motor_get_position_steps(mod->drive);
+                telem_mod->pos_steps_steer = motor_get_position_steps(mod->steer);
+                telem_mod->inv = mod->drive_inverted;
+                
+                // Simple flag detection
+                telem_mod->flags = 0;
+                if (motor_is_busy(mod->steer)) telem_mod->flags |= TELEM_FLAG_TICK_WHILE_IDLE;
+                if (fabsf(telem_mod->ang_now_deg) > 140.0f) telem_mod->flags |= TELEM_FLAG_STEER_LIMIT;
+                if (kin_out.scale_factor < 0.99f) telem_mod->flags |= TELEM_FLAG_DRIVE_SATURATED;
+            }
+        }
+        
+        // Send sample to telemetry system
+        telemetry_sample(&sample);
+        
+        cli_send_string("Sample captured! Use 'telem show' to view it.\r\n");
         return;
     }
     

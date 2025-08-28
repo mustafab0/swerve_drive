@@ -191,32 +191,9 @@ void telemetry_sample(const TelemetrySample* sample) {
 }
 
 void telemetry_process_uart(void) {
-    // Check if there's data to send and UART is idle
-    if (telem_state.ring_head == telem_state.ring_tail) {
-        return; // No data
-    }
-    
-    if (huart3.gState != HAL_UART_STATE_READY) {
-        return; // UART busy
-    }
-    
-    // Calculate available data
-    uint32_t data_len;
-    if (telem_state.ring_head >= telem_state.ring_tail) {
-        data_len = telem_state.ring_head - telem_state.ring_tail;
-    } else {
-        data_len = TELEMETRY_UART_RING_SIZE - telem_state.ring_tail;
-    }
-    
-    // Limit transmission size to avoid long blocking
-    if (data_len > 256) {
-        data_len = 256;
-    }
-    
-    // Start DMA transmission
-    if (HAL_UART_Transmit_DMA(&huart3, &telem_state.uart_ring[telem_state.ring_tail], data_len) == HAL_OK) {
-        telem_state.ring_tail = (telem_state.ring_tail + data_len) % TELEMETRY_UART_RING_SIZE;
-    }
+    // UART output disabled to avoid conflict with CLI
+    // Telemetry data is still captured and available via 'telem show'
+    return;
 }
 
 void telemetry_emit_fault(const char* fault_msg) {
@@ -227,6 +204,10 @@ void telemetry_emit_fault(const char* fault_msg) {
     int len = snprintf(buffer, sizeof(buffer), "FAULT,%lu,%s\r\n", timestamp, fault_msg);
     
     ring_buffer_write(buffer, len);
+}
+
+const TelemetrySample* telemetry_get_latest_sample(void) {
+    return &telem_state.latest;
 }
 
 // UART DMA complete callback (should be called from HAL callback)
