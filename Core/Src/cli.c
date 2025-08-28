@@ -26,6 +26,11 @@ SwerveModule swerve_fr, swerve_fl, swerve_r;
 SKM_State swerve_kin;
 static bool kinematics_initialized = false;
 
+// Twist timeout mechanism
+#define TWIST_TIMEOUT_MS 2000  // 2 second timeout - modify this value to change duration
+static uint32_t twist_start_time = 0;
+static bool twist_timeout_active = false;
+
 static void cli_send_string(const char* str);
 static int cli_receive_line(char* buffer, int max_len);
 
@@ -1094,6 +1099,26 @@ static void cmd_swerve(void)
     }
 }
 
+// Function to check and handle twist timeout
+void twist_timeout_check(void)
+{
+    if (twist_timeout_active) {
+        uint32_t current_time = HAL_GetTick();
+        if (current_time - twist_start_time >= TWIST_TIMEOUT_MS) {
+            // Timeout expired - stop motion
+            skm_set_twist(&swerve_kin, 0.0f, 0.0f, 0.0f);
+            twist_timeout_active = false;
+            // Note: No CLI output here since this runs in 100Hz loop
+        }
+    }
+}
+
+bool twist_should_send_commands(void)
+{
+    // With simple timeout implementation, always send commands
+    return true;
+}
+
 // Function to run kinematics at 100Hz and send to modules
 static void update_twist_kinematics(void)
 {
@@ -1164,6 +1189,7 @@ static void cmd_twist(void)
     if (arg_count >= 2 && strcmp(args[1], "stop") == 0)
     {
         skm_set_twist(&swerve_kin, 0.0f, 0.0f, 0.0f);
+        twist_timeout_active = false;  // Disable timeout on manual stop
         update_twist_kinematics();
         cli_send_string("Robot motion stopped\r\n");
         return;
@@ -1227,16 +1253,27 @@ static void cmd_twist(void)
     float wz = atof(args[3]);
     
     skm_set_twist(&swerve_kin, vx, vy, wz);
+    
+    // Activate timeout if motion command is non-zero
+    if (vx != 0.0f || vy != 0.0f || wz != 0.0f) {
+        twist_start_time = HAL_GetTick();
+        twist_timeout_active = true;
+    } else {
+        // Stop command - disable timeout
+        twist_timeout_active = false;
+    }
+    
     update_twist_kinematics();  // Apply immediately
     
     int32_t vx_x100 = (int32_t)(vx * 100);
     int32_t vy_x100 = (int32_t)(vy * 100);
     int32_t wz_x100 = (int32_t)(wz * 100);
     
-    snprintf(buffer, sizeof(buffer), "Twist command: vx=%d.%02d m/s, vy=%d.%02d m/s, wz=%d.%02d rad/s\r\n", 
+    snprintf(buffer, sizeof(buffer), "Twist command: vx=%d.%02d m/s, vy=%d.%02d m/s, wz=%d.%02d rad/s%s\r\n", 
             (int)(vx_x100/100), abs((int)(vx_x100%100)),
             (int)(vy_x100/100), abs((int)(vy_x100%100)),
-            (int)(wz_x100/100), abs((int)(wz_x100%100)));
+            (int)(wz_x100/100), abs((int)(wz_x100%100)),
+            twist_timeout_active ? " (auto-stop in 2s)" : "");
     cli_send_string(buffer);
 }
 

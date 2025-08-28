@@ -1098,16 +1098,21 @@ void control_loop_100Hz(void)
   motor_poll_counter(&m4);  // R steer
   motor_poll_counter(&m5);  // R drive
   
-  // 2) Run kinematics with slew limiting and scaling
+  // 2) Check for twist command timeout
+  twist_timeout_check();
+  
+  // 3) Run kinematics with scaling
   SKM_Out kin_out;
   skm_update_100Hz(&swerve_kin, &kin_out);
   
-  // 3) Send computed angles and speeds to swerve modules
-  SwerveModule* modules[] = {&swerve_fr, &swerve_fl, &swerve_r};
-  for (int i = 0; i < 3; i++) {
-    if (modules[i] && modules[i]->is_homed) {
-      swerve_module_set_angle_abs(modules[i], kin_out.angle_rad[i]);
-      swerve_module_set_wheel_speed(modules[i], kin_out.speed_mps[i]);
+  // 3) Send computed angles and speeds to swerve modules (only if not in timeout stop)
+  if (twist_should_send_commands()) {
+    SwerveModule* modules[] = {&swerve_fr, &swerve_fl, &swerve_r};
+    for (int i = 0; i < 3; i++) {
+      if (modules[i] && modules[i]->is_homed) {
+        swerve_module_set_angle_abs(modules[i], kin_out.angle_rad[i]);
+        swerve_module_set_wheel_speed(modules[i], kin_out.speed_mps[i]);
+      }
     }
   }
   
@@ -1126,6 +1131,7 @@ void control_loop_100Hz(void)
     sample.scale_factor = kin_out.scale_factor;
     
     // Per-module data
+    SwerveModule* modules[] = {&swerve_fr, &swerve_fl, &swerve_r};
     for (int i = 0; i < 3; i++) {
       SwerveModule* mod = modules[i];
       TelemetryModuleData* telem_mod = &sample.modules[i];
